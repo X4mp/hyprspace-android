@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Hyprspace" parent="android:Theme.Material.Light.NoActionBar" />
+    <!--
+        AppCompat base theme required for AppCompatActivity + BiometricPrompt.
+        Compose draws everything; the system window is just a transparent shell.
+    -->
+    <style name="Theme.Hyprspace" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+
 </resources>
