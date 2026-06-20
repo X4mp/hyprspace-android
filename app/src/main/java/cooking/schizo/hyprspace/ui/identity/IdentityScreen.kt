@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -23,6 +25,9 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +48,8 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import cooking.schizo.hyprspace.model.HyprspaceConfig
 import cooking.schizo.hyprspace.ui.components.SectionCard
+import cooking.schizo.hyprspace.vpn.VpnState
+import cooking.schizo.hyprspace.vpn.VpnStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -50,6 +57,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun IdentityScreen(
     config: HyprspaceConfig?,
+    vpnStatus: VpnStatus,
+    onToggleVpn: () -> Unit,
     snackbarHostState: SnackbarHostState,
     coroutineScope: CoroutineScope,
     modifier: Modifier = Modifier,
@@ -87,7 +96,7 @@ fun IdentityScreen(
 
         val authenticators = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
         } else {
             BiometricManager.Authenticators.BIOMETRIC_WEAK
         }
@@ -211,6 +220,61 @@ fun IdentityScreen(
                 AddressRow(label = "IPv4", value = config?.ipv4 ?: "—")
                 AddressRow(label = "IPv6", value = config?.ipv6 ?: "—")
             }
+        }
+
+        // ── VPN toggle ────────────────────────────────────────────────────────
+        val vpnState = vpnStatus.state
+        val running = vpnState == VpnState.Connected
+        val connecting = vpnState == VpnState.Connecting
+
+        Spacer(modifier = Modifier.height(12.dp))
+        Button(
+            onClick = onToggleVpn,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(75.dp),
+            colors = if (running) {
+                ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                )
+            } else {
+                ButtonDefaults.buttonColors()
+            },
+        ) {
+            if (connecting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(text = "Starting…", style = MaterialTheme.typography.titleLarge)
+            } else {
+                Text(
+                    text = if (running) "Stop" else "Start",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            }
+        }
+
+        // Status line under the button.
+        val statusText = when {
+            connecting -> "Connecting…"
+            running && vpnStatus.connectedPeers > 0 ->
+                "Connected · ${vpnStatus.connectedPeers}/${vpnStatus.totalPeers} peers"
+
+            running -> "Online · waiting for peers"
+            else -> null
+        }
+        if (statusText != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
         }
 
         Spacer(modifier = Modifier.height(8.dp))

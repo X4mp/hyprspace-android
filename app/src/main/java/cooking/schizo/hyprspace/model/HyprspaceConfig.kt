@@ -22,14 +22,14 @@ data class PeerConfig(
  * Persisted as a single JSON file at [android.content.Context.getFilesDir]/hyprspace.json.
  * Read at startup; written back on every mutation (add/remove peer).
  *
- * The [peerId], [ipv4], and [ipv6] fields are derived on first launch from [privateKey]
- * and stored for display. When a real cryptographic backend is integrated they can be
- * recomputed deterministically instead.
+ * The [peerId], [ipv4], and [ipv6] fields are derived from [privateKey] by the libp2p
+ * layer on first launch and stored for display only; Go ignores them when reading the
+ * config back.
  *
  * Full JSON shape:
  * ```json
  * {
- *   "privateKey": "u<base64url>",
+ *   "privateKey": "z<base58btc>",
  *   "peerId":     "12D3KooW…",
  *   "ipv4":       "100.64.x.x",
  *   "ipv6":       "fd00::x:x",

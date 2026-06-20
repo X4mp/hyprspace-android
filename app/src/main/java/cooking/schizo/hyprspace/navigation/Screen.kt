@@ -1,6 +1,7 @@
 package cooking.schizo.hyprspace.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ConnectWithoutContact
 import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -20,7 +21,7 @@ sealed class Screen(
     data object Identity : Screen(
         route = "identity",
         title = "Hyprspace",
-        icon = Icons.Outlined.Fingerprint,
+        icon = Icons.Outlined.ConnectWithoutContact,
     )
 
     data object Peers : Screen(

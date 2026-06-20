@@ -1,131 +1,197 @@
 package cooking.schizo.hyprspace
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import cooking.schizo.hyprspace.navigation.Screen
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.dp
 import cooking.schizo.hyprspace.ui.identity.IdentityScreen
 import cooking.schizo.hyprspace.ui.peers.PeersScreen
 import cooking.schizo.hyprspace.ui.theme.HyprspaceTheme
 import cooking.schizo.hyprspace.viewmodel.ConfigViewModel
+import cooking.schizo.hyprspace.vpn.HyprspaceVpnService
+import cooking.schizo.hyprspace.vpn.VpnState
 
-/**
- * Single activity for the entire app.
- *
- * Extends [AppCompatActivity] (rather than [androidx.activity.ComponentActivity]) so
- * that [androidx.biometric.BiometricPrompt] — which requires a [androidx.fragment.app.FragmentActivity]
- * — can be launched from composables via [androidx.compose.ui.platform.LocalContext].
- *
- * The [ConfigViewModel] lives here and is passed to each screen so that the future
- * Connection/VPN screen can share the same instance without a NavHost.
- */
 class MainActivity : AppCompatActivity() {
 
     private val viewModel: ConfigViewModel by viewModels()
 
+    /** Launches the system VPN consent dialog; starts the service on approval. */
+    private lateinit var vpnConsentLauncher: ActivityResultLauncher<Intent>
+
+    /** Requests POST_NOTIFICATIONS (API 33+) so the foreground notification shows. */
+    private lateinit var notificationPermLauncher: ActivityResultLauncher<String>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        vpnConsentLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult(),
+        ) { result ->
+            if (result.resultCode == RESULT_OK) {
+                startVpnService()
+            }
+            // Declined consent → remain stopped; nothing to do.
+        }
+
+        notificationPermLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { /* FGS runs regardless; the notification is just hidden if denied. */ }
+
         enableEdgeToEdge()
         setContent {
             HyprspaceTheme {
-                HyprspaceApp(viewModel = viewModel)
+                HyprspaceApp(
+                    viewModel = viewModel,
+                    onToggleVpn = ::toggleVpn,
+                )
             }
+        }
+    }
+
+    /**
+     * Entry point for the Start/Stop button. Stops immediately when running;
+     * otherwise runs the VPN consent flow before starting the service.
+     */
+    private fun toggleVpn() {
+        val state = viewModel.vpnStatus.value.state
+        if (state == VpnState.Connecting || state == VpnState.Connected) {
+            HyprspaceVpnService.stop(this)
+            return
+        }
+
+        maybeRequestNotificationPermission()
+
+        val consent = VpnService.prepare(this)
+        if (consent != null) {
+            vpnConsentLauncher.launch(consent)
+        } else {
+            startVpnService()
+        }
+    }
+
+    private fun startVpnService() {
+        HyprspaceVpnService.start(this)
+    }
+
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HyprspaceApp(viewModel: ConfigViewModel) {
+fun HyprspaceApp(
+    viewModel: ConfigViewModel,
+    onToggleVpn: () -> Unit,
+) {
     val config by viewModel.config.collectAsState()
+    val vpnStatus by viewModel.vpnStatus.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
-    var currentScreen by remember { mutableStateOf<Screen>(Screen.Identity) }
-    val isImeVisible = WindowInsets.isImeVisible
+    val pagerState = rememberPagerState(pageCount = { 2 })
+
+    // Surface fatal VPN errors once, as they arrive.
+    LaunchedEffect(vpnStatus.state, vpnStatus.detail) {
+        if (vpnStatus.state == VpnState.Error && vpnStatus.detail.isNotEmpty()) {
+            snackbarHostState.showSnackbar("VPN error: ${vpnStatus.detail}")
+        }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(title = { Text(currentScreen.title) })
-        },
-        bottomBar = {
-            AnimatedVisibility(
-                visible = !isImeVisible,
-                enter = slideInVertically(initialOffsetY = { it }),
-                exit = slideOutVertically(targetOffsetY = { it }),
-            ) {
-                NavigationBar {
-                    Screen.all.forEach { screen ->
-                        NavigationBarItem(
-                            selected = currentScreen == screen,
-                            onClick = { currentScreen = screen },
-                            icon = {
-                                Icon(
-                                    imageVector = screen.icon,
-                                    contentDescription = screen.title,
-                                )
-                            },
-                            label = { Text(screen.title) },
-                        )
-                    }
-
-                    // TODO: Uncomment when VpnService integration is ready.
-                    // NavigationBarItem(
-                    //     selected = currentScreen == Screen.Connection,
-                    //     onClick = { currentScreen = Screen.Connection },
-                    //     icon = { Icon(Icons.Outlined.VpnKey, contentDescription = "Connection") },
-                    //     label = { Text("Connection") },
-                    // )
-                }
-            }
-        },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
-            when (currentScreen) {
-                Screen.Identity -> IdentityScreen(
-                    config = config,
-                    snackbarHostState = snackbarHostState,
-                    coroutineScope = coroutineScope,
-                    modifier = Modifier.fillMaxSize(),
-                )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                when (page) {
+                    0 -> IdentityScreen(
+                        config = config,
+                        vpnStatus = vpnStatus,
+                        onToggleVpn = onToggleVpn,
+                        snackbarHostState = snackbarHostState,
+                        coroutineScope = coroutineScope,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 40.dp),
+                    )
 
-                Screen.Peers -> PeersScreen(
-                    config = config,
-                    onAddPeer = viewModel::addPeer,
-                    onRemovePeer = viewModel::removePeer,
-                    snackbarHostState = snackbarHostState,
-                    coroutineScope = coroutineScope,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                    1 -> PeersScreen(
+                        config = config,
+                        onAddPeer = viewModel::addPeer,
+                        onRemovePeer = viewModel::removePeer,
+                        snackbarHostState = snackbarHostState,
+                        coroutineScope = coroutineScope,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 40.dp),
+                    )
+                }
+            }
+
+            // Minimal page indicator — two dots, centered at the bottom.
+            // Not a navigation bar: no labels, no icons, no tappable items.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                repeat(2) { index ->
+                    val selected = pagerState.currentPage == index
+                    Box(
+                        modifier = Modifier
+                            .size(if (selected) 8.dp else 6.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                    )
+                }
             }
         }
     }

@@ -1,12 +1,10 @@
 package cooking.schizo.hyprspace.data
 
 import android.content.Context
-import android.util.Base64
 import cooking.schizo.hyprspace.model.HyprspaceConfig
+import cooking.schizo.hyprspace.model.PeerConfig
+import hyprspace.mobile.Mobile
 import java.io.File
-import java.math.BigInteger
-import java.security.MessageDigest
-import java.security.SecureRandom
 
 /**
  * Reads and writes the single Hyprspace config file located at
@@ -18,69 +16,66 @@ import java.security.SecureRandom
 class ConfigRepository(context: Context) {
 
     private val configFile = File(context.filesDir, "hyprspace.json")
-    private val random = SecureRandom()
 
     /**
      * Returns the persisted config, or creates a fresh one on first launch.
-     * A corrupted file is silently replaced.
+     *
+     * A corrupted file — or one written by a pre-libp2p build whose private key
+     * isn't a real libp2p key — is regenerated. Configured peers are preserved
+     * across regeneration.
      */
-    fun loadOrCreate(): HyprspaceConfig =
-        if (configFile.exists()) {
-            runCatching { HyprspaceConfig.fromJson(configFile.readText()) }
-                .getOrElse { generateNewConfig().also { save(it) } }
+    fun loadOrCreate(): HyprspaceConfig {
+        val existing = if (configFile.exists()) {
+            runCatching { HyprspaceConfig.fromJson(configFile.readText()) }.getOrNull()
         } else {
-            generateNewConfig().also { save(it) }
+            null
         }
+
+        return when {
+            existing == null -> createConfig(peers = emptyList())
+            // Real libp2p keys are multibase Base58BTC ("z" prefix). Older builds
+            // stored a fake base64url key ("u"); regenerate but keep the peers.
+            !existing.privateKey.startsWith("z") -> createConfig(peers = existing.peers)
+            else -> existing
+        }
+    }
 
     fun save(config: HyprspaceConfig) {
         configFile.writeText(config.toJson())
     }
 
     // -------------------------------------------------------------------------
-    // Key / address generation (placeholder — replace with real libp2p crypto)
+    // Identity generation (real libp2p crypto via the gomobile binding)
     // -------------------------------------------------------------------------
 
-    private fun generateNewConfig(): HyprspaceConfig {
-        // 256-bit private key encoded as multibase base64url ("u" prefix)
-        val keyBytes = ByteArray(32).also { random.nextBytes(it) }
-        val privateKey =
-            "u" + Base64.encodeToString(keyBytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+    /**
+     * Generates a fresh libp2p identity and writes a config carrying [peers].
+     *
+     * The display addresses are derived by the Go layer ([Mobile.getVPNConfig]),
+     * which needs the file on disk first — hence the write/read/write sequence.
+     * This only runs on first launch (or migration), so the double write is fine.
+     */
+    private fun createConfig(peers: List<PeerConfig>): HyprspaceConfig {
+        val identity = Mobile.generateIdentity()
 
-        // Derive a deterministic peer ID from SHA-256(privateKey).
-        // Real libp2p peer IDs are multihash(SHA-256(publicKey)) encoded base58btc.
-        val hash = MessageDigest.getInstance("SHA-256").digest(keyBytes)
-        val peerId = "12D3KooW" + encodeBase58(hash).take(38)
-
-        // Hyprspace VPN address space: 100.64.0.0/10 (IPv4), fd00::/8 (IPv6)
-        val addrBytes = ByteArray(2).also { random.nextBytes(it) }
-        val b1 = addrBytes[0].toInt() and 0x3F  // 0–63 → keeps us in 100.64–100.127
-        val b2 = addrBytes[1].toInt() and 0xFF
-        val ipv4 = "100.64.$b1.$b2"
-        val ipv6 = "fd00::${b1.toString(16)}:${b2.toString(16)}"
-
-        return HyprspaceConfig(
-            privateKey = privateKey,
-            peerId = peerId,
-            ipv4 = ipv4,
-            ipv6 = ipv6,
-            peers = emptyList(),
+        var config = HyprspaceConfig(
+            privateKey = identity.privateKey,
+            peerId = identity.peerID,
+            ipv4 = "",
+            ipv6 = "",
+            peers = peers,
         )
-    }
+        save(config)
 
-    /** Bitcoin base58 encoding (base58btc alphabet, no check). */
-    private fun encodeBase58(input: ByteArray): String {
-        val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-        var value = BigInteger(1, input)
-        val base = BigInteger.valueOf(58L)
-        val sb = StringBuilder()
-        while (value > BigInteger.ZERO) {
-            val (q, r) = value.divideAndRemainder(base)
-            sb.append(alphabet[r.toInt()])
-            value = q
-        }
-        for (byte in input) {
-            if (byte == 0.toByte()) sb.append('1') else break
-        }
-        return sb.reverse().toString()
+        config = runCatching {
+            val vpn = Mobile.getVPNConfig(configFile.absolutePath)
+            config.copy(
+                ipv4 = vpn.address4.substringBefore('/'),
+                ipv6 = vpn.address6.substringBefore('/'),
+            )
+        }.getOrDefault(config)
+        save(config)
+
+        return config
     }
 }

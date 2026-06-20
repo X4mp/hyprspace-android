@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import cooking.schizo.hyprspace.data.ConfigRepository
 import cooking.schizo.hyprspace.model.HyprspaceConfig
 import cooking.schizo.hyprspace.model.PeerConfig
+import cooking.schizo.hyprspace.vpn.VpnStateHolder
+import cooking.schizo.hyprspace.vpn.VpnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +31,12 @@ class ConfigViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _config = MutableStateFlow<HyprspaceConfig?>(null)
     val config: StateFlow<HyprspaceConfig?> = _config.asStateFlow()
+
+    /**
+     * Live VPN status pushed by [HyprspaceVpnService] (via gomobile Events).
+     * The UI observes this for the Start/Stop button and error reporting.
+     */
+    val vpnStatus: StateFlow<VpnStatus> = VpnStateHolder.status
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
