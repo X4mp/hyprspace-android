@@ -36,6 +36,7 @@ class ConfigRepository(context: Context) {
             // Real libp2p keys are multibase Base58BTC ("z" prefix). Older builds
             // stored a fake base64url key ("u"); regenerate but keep the peers.
             !existing.privateKey.startsWith("z") -> createConfig(peers = existing.peers)
+
             else -> existing
         }
     }
