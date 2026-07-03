@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -22,6 +24,7 @@ import hyprspace.mobile.Node
 import hyprspace.mobile.VPNConfig
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Foreground [VpnService] that hosts the Hyprspace node.
@@ -30,12 +33,15 @@ import java.util.concurrent.Executors
  * ([Mobile.getVPNConfig]), builds the TUN interface, hands the detached fd to
  * [Mobile.startNode], and keeps a [Node] handle for shutdown.
  *
- * All blocking/Go work runs on a single worker thread; `onStartCommand` only
- * enters the foreground synchronously to satisfy the OS time window.
+ * Blocking/Go work runs off the main thread; `onStartCommand` only enters the
+ * foreground synchronously to satisfy the OS time window.
  */
 class HyprspaceVpnService : VpnService() {
 
-    private val worker = Executors.newSingleThreadExecutor()
+    private val worker = Executors.newCachedThreadPool()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val startGeneration = AtomicInteger(0)
+    private val lifecycleLock = Any()
 
     @Volatile
     private var node: Node? = null
@@ -47,15 +53,23 @@ class HyprspaceVpnService : VpnService() {
     private val events = object : Events {
         override fun onStateChange(state: String, detail: String) {
             VpnStateHolder.onGoState(state, detail)
+            if (!isVpnWanted()) return
+
             when (state) {
                 "running" -> updateNotification("Online — waiting for peers")
                 "connected" -> updateNotification("Connected")
-                "error" -> updateNotification("Error: $detail")
+                "error" -> {
+                    val message = detail.ifBlank { "Hyprspace node stopped unexpectedly" }
+                    updateNotification("Error: $message")
+                    failAndStop(message)
+                }
             }
         }
 
         override fun onPeerCountChange(connected: Long, total: Long) {
             VpnStateHolder.onPeerCount(connected.toInt(), total.toInt())
+            if (!isVpnWanted()) return
+
             if (connected > 0) {
                 updateNotification("Connected — $connected/$total peers")
             }
@@ -68,12 +82,31 @@ class HyprspaceVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        // ACTION_START, or a null intent redelivered by the OS after the process
-        // was killed while the tunnel was up: (re)establish it. startNode() first
-        // stops any lingering node, so a redelivery can't double-start.
+        // ACTION_START, or a redelivered intent after the process was killed
+        // while the tunnel was up. Only honor it while the user's desired state
+        // is still running; notification/app Stop clears that flag so a stale
+        // redelivery cannot bring the UI back to "Online" after an explicit stop.
+        if (!isVpnWanted()) {
+            VpnStateHolder.setStopped()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (VpnStateHolder.status.value.state == VpnState.Connecting) {
+            // Ignore duplicate/redelivered starts while a start attempt is already in flight.
+            return START_REDELIVER_INTENT
+        }
+        synchronized(lifecycleLock) {
+            if (node != null) {
+                // Ignore duplicate/redelivered starts while the current node is alive.
+                return START_REDELIVER_INTENT
+            }
+        }
+
+        val generation = startGeneration.incrementAndGet()
         VpnStateHolder.setConnecting()
         startForegroundCompat(buildNotification("Starting…"))
-        worker.execute { startNode() }
+        worker.execute { startNode(generation) }
+        scheduleStartTimeout(generation)
         // REDELIVER (not STICKY) so the OS hands us the original ACTION_START
         // intent on restart and we never relaunch after a clean, user stop.
         return START_REDELIVER_INTENT
@@ -86,41 +119,51 @@ class HyprspaceVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        // Allows an in-flight node.stop() task to finish.
-        worker.shutdown()
+        // Interrupt queued work; Go calls may ignore interruption, so stale
+        // completions are guarded by [startGeneration].
+        worker.shutdownNow()
         super.onDestroy()
     }
 
     // ── Node lifecycle ──────────────────────────────────────────────────────
 
-    private fun startNode() {
+    private fun startNode(generation: Int) {
         val configPath = File(filesDir, CONFIG_FILE).absolutePath
         try {
             // Defensive: stop any node lingering from a prior soft error so a
             // restart never leaks a running host.
-            node?.let {
-                runCatching { it.stop() }
-                node = null
-            }
+            synchronized(lifecycleLock) {
+                node.also { node = null }
+            }?.let { runCatching { it.stop() } }
 
             val vpnConfig = Mobile.getVPNConfig(configPath)
 
             val pfd = buildTunnel(vpnConfig)
             if (pfd == null) {
                 Log.e(TAG, "establish() returned null (VPN not prepared?)")
-                failAndStop("VPN permission was revoked")
+                failAndStop(generation, "VPN permission was revoked")
+                return
+            }
+            if (!isCurrentStart(generation)) {
+                runCatching { pfd.close() }
                 return
             }
 
-            // Ownership of the fd transfers to Go, which closes it on stop().
+            // Ownership of the detached fd transfers to Go when startNode is
+            // called; the binding closes it on stop and on its own error paths.
             val fd = pfd.detachFd()
             // Go emits "running" via [events] once the node is up, which drives
             // the UI to Connected — we don't set success state here.
-            node = Mobile.startNode(fd.toLong(), configPath, events)
+            val startedNode = Mobile.startNode(fd.toLong(), configPath, events)
+            if (!isCurrentStart(generation)) {
+                runCatching { startedNode.stop() }
+                return
+            }
+            synchronized(lifecycleLock) { node = startedNode }
             Log.i(TAG, "Hyprspace node started")
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to start Hyprspace node", t)
-            failAndStop(t.message ?: "Failed to start the tunnel")
+            failAndStop(generation, t.message ?: "Failed to start the tunnel")
         }
     }
 
@@ -150,27 +193,52 @@ class HyprspaceVpnService : VpnService() {
 
     /** Graceful, user-initiated stop. */
     private fun stopVpn() {
+        startGeneration.incrementAndGet()
+        setVpnWanted(false)
         VpnStateHolder.setStopped()
         teardown()
     }
 
     /** Stop triggered by a failure; keeps the error visible in the UI. */
+    private fun failAndStop(generation: Int, message: String) {
+        if (!isCurrentStart(generation)) return
+        setVpnWanted(false)
+        VpnStateHolder.setError(message)
+        teardown()
+    }
+
     private fun failAndStop(message: String) {
+        startGeneration.incrementAndGet()
+        setVpnWanted(false)
         VpnStateHolder.setError(message)
         teardown()
     }
 
     private fun teardown() {
+        val nodeToStop = synchronized(lifecycleLock) {
+            node.also { node = null }
+        }
         worker.execute {
             try {
-                node?.stop()
+                nodeToStop?.stop()
             } catch (t: Throwable) {
                 Log.w(TAG, "Error stopping node", t)
             }
-            node = null
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun isCurrentStart(generation: Int): Boolean =
+        isVpnWanted() && startGeneration.get() == generation
+
+    private fun scheduleStartTimeout(generation: Int) {
+        mainHandler.postDelayed({
+            if (isCurrentStart(generation) && VpnStateHolder.status.value.state == VpnState.Connecting) {
+                Log.e(TAG, "Timed out while starting Hyprspace node")
+                failAndStop(generation, "Timed out while starting the tunnel")
+            }
+        }, START_TIMEOUT_MS)
     }
 
     // ── TUN builder helpers ─────────────────────────────────────────────────
@@ -252,6 +320,13 @@ class HyprspaceVpnService : VpnService() {
         }
     }
 
+    private fun isVpnWanted(): Boolean =
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(PREF_WANTED, false)
+
+    private fun setVpnWanted(wanted: Boolean) {
+        setVpnWanted(this, wanted)
+    }
+
     companion object {
         const val ACTION_START = "cooking.schizo.hyprspace.vpn.START"
         const val ACTION_STOP = "cooking.schizo.hyprspace.vpn.STOP"
@@ -260,9 +335,20 @@ class HyprspaceVpnService : VpnService() {
         private const val CONFIG_FILE = "hyprspace.json"
         private const val CHANNEL_ID = "hyprspace_vpn"
         private const val NOTIFICATION_ID = 1
+        private const val START_TIMEOUT_MS = 45_000L
+        private const val PREFS_NAME = "hyprspace_vpn"
+        private const val PREF_WANTED = "wanted"
+
+        private fun setVpnWanted(context: Context, wanted: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_WANTED, wanted)
+                .apply()
+        }
 
         /** Starts the service in the foreground. Caller must have completed VPN consent. */
         fun start(context: Context) {
+            setVpnWanted(context, true)
             val intent = Intent(context, HyprspaceVpnService::class.java)
                 .setAction(ACTION_START)
             ContextCompat.startForegroundService(context, intent)
@@ -270,6 +356,7 @@ class HyprspaceVpnService : VpnService() {
 
         /** Requests a graceful stop. */
         fun stop(context: Context) {
+            setVpnWanted(context, false)
             val intent = Intent(context, HyprspaceVpnService::class.java)
                 .setAction(ACTION_STOP)
             context.startService(intent)

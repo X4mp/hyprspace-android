@@ -91,6 +91,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // The service expects filesDir/hyprspace.json to exist; first-launch
+        // identity creation happens asynchronously in ConfigViewModel.
+        if (viewModel.config.value == null) return
+
         maybeRequestNotificationPermission()
 
         val consent = VpnService.prepare(this)
@@ -102,6 +106,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpnService() {
+        if (viewModel.config.value == null) return
         HyprspaceVpnService.start(this)
     }
 
@@ -160,6 +165,7 @@ fun HyprspaceApp(
 
                     1 -> PeersScreen(
                         config = config,
+                        vpnStatus = vpnStatus,
                         onAddPeer = viewModel::addPeer,
                         onRemovePeer = viewModel::removePeer,
                         snackbarHostState = snackbarHostState,

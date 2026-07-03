@@ -226,10 +226,13 @@ fun IdentityScreen(
         val vpnState = vpnStatus.state
         val running = vpnState == VpnState.Connected
         val connecting = vpnState == VpnState.Connecting
+        val configReady = config != null
+        val actionEnabled = running || connecting || configReady
 
         Spacer(modifier = Modifier.height(12.dp))
         Button(
             onClick = onToggleVpn,
+            enabled = actionEnabled,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(75.dp),
@@ -252,7 +255,11 @@ fun IdentityScreen(
                 Text(text = "Starting…", style = MaterialTheme.typography.titleLarge)
             } else {
                 Text(
-                    text = if (running) "Stop" else "Start",
+                    text = when {
+                        running -> "Stop"
+                        !configReady -> "Loading…"
+                        else -> "Start"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                 )
             }
@@ -265,6 +272,7 @@ fun IdentityScreen(
                 "Connected · ${vpnStatus.connectedPeers}/${vpnStatus.totalPeers} peers"
 
             running -> "Online · waiting for peers"
+            !configReady -> "Generating identity…"
             else -> null
         }
         if (statusText != null) {

@@ -37,7 +37,7 @@ class ConfigRepository(context: Context) {
             // stored a fake base64url key ("u"); regenerate but keep the peers.
             !existing.privateKey.startsWith("z") -> createConfig(peers = existing.peers)
 
-            else -> existing
+            else -> validateExistingOrCreate(existing)
         }
     }
 
@@ -50,33 +50,56 @@ class ConfigRepository(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
+     * Validates a persisted libp2p-looking identity with the Go parser. Peer IDs
+     * are restored after validation so one bad saved peer cannot rotate the local
+     * node identity.
+     */
+    private fun validateExistingOrCreate(existing: HyprspaceConfig): HyprspaceConfig {
+        return runCatching {
+            existing.copy(peers = emptyList())
+                .withDerivedAddresses()
+                .copy(peers = existing.peers)
+                .also { save(it) }
+        }.getOrElse {
+            createConfig(peers = existing.peers)
+        }
+    }
+
+    /**
      * Generates a fresh libp2p identity and writes a config carrying [peers].
      *
      * The display addresses are derived by the Go layer ([Mobile.getVPNConfig]),
-     * which needs the file on disk first — hence the write/read/write sequence.
-     * This only runs on first launch (or migration), so the double write is fine.
+     * which needs the file on disk first. Address derivation uses a temporary
+     * no-peer config so a bad saved peer cannot leave the generated identity with
+     * empty display addresses.
      */
     private fun createConfig(peers: List<PeerConfig>): HyprspaceConfig {
         val identity = Mobile.generateIdentity()
 
-        var config = HyprspaceConfig(
+        val identityOnlyConfig = HyprspaceConfig(
             privateKey = identity.privateKey,
             peerId = identity.peerID,
             ipv4 = "",
             ipv6 = "",
-            peers = peers,
+            peers = emptyList(),
         )
-        save(config)
+        save(identityOnlyConfig)
 
-        config = runCatching {
-            val vpn = Mobile.getVPNConfig(configFile.absolutePath)
-            config.copy(
-                ipv4 = vpn.address4.substringBefore('/'),
-                ipv6 = vpn.address6.substringBefore('/'),
-            )
-        }.getOrDefault(config)
+        val config = identityOnlyConfig.withDerivedAddresses().copy(peers = peers)
         save(config)
 
         return config
+    }
+
+    /** Reads the config through Go and returns a copy with non-empty display addresses. */
+    private fun HyprspaceConfig.withDerivedAddresses(): HyprspaceConfig {
+        save(this)
+        val vpn = Mobile.getVPNConfig(configFile.absolutePath)
+        val ipv4 = vpn.address4.substringBefore('/')
+        val ipv6 = vpn.address6.substringBefore('/')
+        require(ipv4.isNotBlank() && ipv6.isNotBlank()) {
+            "Hyprspace config did not produce display addresses"
+        }
+        return copy(ipv4 = ipv4, ipv6 = ipv6)
     }
 }

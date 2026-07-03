@@ -40,7 +40,7 @@ object VpnStateHolder {
         _status.value = VpnStatus(state = VpnState.Connecting)
     }
 
-    /** Marks a clean shutdown. */
+    /** Marks a clean shutdown. Late Go callbacks from the stopped node are ignored. */
     fun setStopped() {
         _status.value = VpnStatus(state = VpnState.Stopped)
     }
@@ -54,17 +54,40 @@ object VpnStateHolder {
     fun onGoState(goState: String, detail: String) {
         _status.update {
             val mapped = when (goState) {
-                "running", "connected" -> VpnState.Connected
-                "stopped" -> VpnState.Stopped
-                "error" -> VpnState.Error
+                // A stopped UI state is authoritative after an explicit app or
+                // notification stop. Ignore late callbacks from the old Go node
+                // until a new user start calls setConnecting().
+                "running", "connected" -> when (it.state) {
+                    VpnState.Connecting, VpnState.Connected -> VpnState.Connected
+                    else -> it.state
+                }
+                // A fatal error path tears the service down and may be followed by
+                // a Go "stopped" callback. Keep the error visible until the next
+                // explicit start/stop transition instead of immediately clearing it.
+                "stopped" -> if (it.state == VpnState.Error) VpnState.Error else VpnState.Stopped
+                "error" -> if (it.state == VpnState.Stopped) VpnState.Stopped else VpnState.Error
                 else -> it.state
             }
-            it.copy(state = mapped, detail = detail)
+            val nextDetail = if (goState == "stopped" && it.state == VpnState.Error) {
+                it.detail
+            } else if (mapped == VpnState.Stopped) {
+                ""
+            } else {
+                detail
+            }
+            it.copy(state = mapped, detail = nextDetail)
         }
     }
 
     /** Applies a gomobile `Events.onPeerCountChange` update. */
     fun onPeerCount(connected: Int, total: Int) {
-        _status.update { it.copy(connectedPeers = connected, totalPeers = total) }
+        _status.update {
+            when (it.state) {
+                VpnState.Connecting, VpnState.Connected ->
+                    it.copy(connectedPeers = connected, totalPeers = total)
+
+                else -> it
+            }
+        }
     }
 }

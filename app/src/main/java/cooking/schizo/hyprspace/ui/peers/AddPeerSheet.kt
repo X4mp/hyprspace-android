@@ -30,9 +30,9 @@ import cooking.schizo.hyprspace.model.PeerConfig
 /**
  * Modal bottom sheet for adding a new peer.
  *
- * Validates that the Peer ID field contains a plausible libp2p peer ID before
- * enabling the "Add" button. Full cryptographic validation can be added when the
- * libp2p backend is integrated.
+ * Validates that the Peer ID field contains the canonical Ed25519 libp2p peer ID
+ * form generated/displayed by this app before enabling the "Add" button. Full
+ * cryptographic validation can be added when the backend exposes a decoder.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,7 +85,7 @@ fun AddPeerSheet(
                     peerIdError = when {
                         raw.isBlank() -> null
                         !isValidPeerId(raw.trim()) ->
-                            "Must be a valid libp2p peer ID (e.g. starts with 12D3KooW…)"
+                            "Must be a 52-character peer ID starting with 12D3KooW"
                         else -> null
                     }
                 },
@@ -122,14 +122,13 @@ fun AddPeerSheet(
 }
 
 /**
- * Lightweight peer ID validator.
+ * Conservative interim peer ID validator.
  *
- * Accepts strings that start with the canonical libp2p base58btc multihash prefix
- * ("12D3KooW") OR any base58btc-looking string of sufficient length. Full
- * validation (multihash decode + public key check) belongs in the crypto backend.
+ * The gomobile binding does not currently expose a peer-ID decoder, so only
+ * accept the canonical base58btc Ed25519 peer IDs generated/displayed by this app.
  */
 private fun isValidPeerId(id: String): Boolean {
-    if (id.length < 10) return false
+    if (id.length != 52 || !id.startsWith("12D3KooW")) return false
     // base58btc alphabet — no 0, O, I, l
     val base58 = Regex("[1-9A-HJ-NP-Za-km-z]+")
     return base58.matches(id)
