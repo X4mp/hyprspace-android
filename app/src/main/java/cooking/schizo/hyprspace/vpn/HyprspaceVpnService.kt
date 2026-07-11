@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -24,6 +25,7 @@ import hyprspace.mobile.Node
 import hyprspace.mobile.VPNConfig
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -45,6 +47,12 @@ class HyprspaceVpnService : VpnService() {
 
     @Volatile
     private var node: Node? = null
+
+    /**
+     * True while a node shutdown is in flight, so re-entrant teardown calls
+     * coalesce and [finalizeStop] runs exactly once. Guarded by [lifecycleLock].
+     */
+    private var teardownInProgress = false
 
     /**
      * Reverse-binding from Go. Called from arbitrary libp2p goroutines, so it
@@ -91,8 +99,10 @@ class HyprspaceVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (VpnStateHolder.status.value.state == VpnState.Connecting) {
-            // Ignore duplicate/redelivered starts while a start attempt is already in flight.
+        if (VpnStateHolder.status.value.state == VpnState.Connecting ||
+            VpnStateHolder.status.value.state == VpnState.Stopping
+        ) {
+            // Ignore duplicate/redelivered starts while a lifecycle transition is in flight.
             return START_REDELIVER_INTENT
         }
         synchronized(lifecycleLock) {
@@ -195,8 +205,8 @@ class HyprspaceVpnService : VpnService() {
     private fun stopVpn() {
         startGeneration.incrementAndGet()
         setVpnWanted(false)
-        VpnStateHolder.setStopped()
-        teardown()
+        VpnStateHolder.setStopping()
+        teardown(markStoppedWhenDone = true)
     }
 
     /** Stop triggered by a failure; keeps the error visible in the UI. */
@@ -204,29 +214,92 @@ class HyprspaceVpnService : VpnService() {
         if (!isCurrentStart(generation)) return
         setVpnWanted(false)
         VpnStateHolder.setError(message)
-        teardown()
+        teardown(markStoppedWhenDone = false)
     }
 
     private fun failAndStop(message: String) {
         startGeneration.incrementAndGet()
         setVpnWanted(false)
         VpnStateHolder.setError(message)
-        teardown()
+        teardown(markStoppedWhenDone = false)
     }
 
-    private fun teardown() {
+    private fun teardown(markStoppedWhenDone: Boolean) {
+        val generation = startGeneration.get()
         val nodeToStop = synchronized(lifecycleLock) {
-            node.also { node = null }
+            when {
+                node != null -> {
+                    teardownInProgress = true
+                    node.also { node = null }
+                }
+                // No node here, but another teardown already owns the shutdown —
+                // let it finalize exactly once.
+                teardownInProgress -> return
+                // Genuinely already stopped: fall through and finalize below.
+                else -> null
+            }
         }
+        if (nodeToStop == null) {
+            mainHandler.post { finalizeStop(markStoppedWhenDone, generation, forced = false) }
+            return
+        }
+
+        // Guaranteed UI recovery: the native node.stop() can hang indefinitely —
+        // observed with libp2p host.Close() blocking on a background service, which
+        // otherwise leaves the UI wedged in "Stopping" forever. See
+        // STOP_HANG_INVESTIGATION.md for the root-cause investigation.
+        //
+        // Whichever happens first — stop() returning or the watchdog firing — wins
+        // the [finalized] guard and finalizes teardown exactly once.
+        val finalized = AtomicBoolean(false)
+        val watchdog = Runnable {
+            if (finalized.compareAndSet(false, true)) {
+                Log.e(TAG, "node.stop() timed out after ${STOP_TIMEOUT_MS}ms; forcing teardown")
+                finalizeStop(markStoppedWhenDone, generation, forced = true)
+            }
+        }
+        mainHandler.postDelayed(watchdog, STOP_TIMEOUT_MS)
+
         worker.execute {
             try {
-                nodeToStop?.stop()
+                nodeToStop.stop()
             } catch (t: Throwable) {
                 Log.w(TAG, "Error stopping node", t)
+            } finally {
+                if (finalized.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(watchdog)
+                    mainHandler.post { finalizeStop(markStoppedWhenDone, generation, forced = false) }
+                }
             }
+        }
+    }
+
+    /**
+     * Finalizes shutdown: resets UI state, drops the foreground notification and
+     * stops the service. Must run on the main thread and exactly once per teardown
+     * (guarded by the caller's [AtomicBoolean] and [teardownInProgress]).
+     *
+     * When [forced] is true the native libp2p host is still wedged in host.Close()
+     * and its goroutines / OS threads (plus the netlink-retry loop) will linger in
+     * this process. We hard-exit shortly after — once "Stopped" and the removed
+     * notification have been delivered — so the next Start gets a clean process
+     * instead of inheriting a stuck Go runtime and half-open sockets.
+     */
+    private fun finalizeStop(markStoppedWhenDone: Boolean, generation: Int, forced: Boolean) {
+        synchronized(lifecycleLock) { teardownInProgress = false }
+        if (markStoppedWhenDone) {
+            VpnStateHolder.setStopped()
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        // Only hard-exit if this stop attempt still owns the process — a start that
+        // began after this teardown bumps startGeneration and must not be killed.
+        if (forced && startGeneration.get() == generation) {
+            mainHandler.postDelayed(
+                { Process.killProcess(Process.myPid()) },
+                FORCE_EXIT_GRACE_MS,
+            )
+        }
     }
 
     private fun isCurrentStart(generation: Int): Boolean =
@@ -336,6 +409,8 @@ class HyprspaceVpnService : VpnService() {
         private const val CHANNEL_ID = "hyprspace_vpn"
         private const val NOTIFICATION_ID = 1
         private const val START_TIMEOUT_MS = 45_000L
+        private const val STOP_TIMEOUT_MS = 8_000L
+        private const val FORCE_EXIT_GRACE_MS = 750L
         private const val PREFS_NAME = "hyprspace_vpn"
         private const val PREF_WANTED = "wanted"
 

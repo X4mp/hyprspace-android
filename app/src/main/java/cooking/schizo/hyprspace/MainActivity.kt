@@ -2,6 +2,7 @@ package cooking.schizo.hyprspace
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -36,7 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import cooking.schizo.hyprspace.debug.DebugLogStore
 import cooking.schizo.hyprspace.ui.identity.IdentityScreen
+import cooking.schizo.hyprspace.ui.logs.LogsScreen
 import cooking.schizo.hyprspace.ui.peers.PeersScreen
 import cooking.schizo.hyprspace.ui.theme.HyprspaceTheme
 import cooking.schizo.hyprspace.viewmodel.ConfigViewModel
@@ -56,6 +59,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val showDebugLogs = isDebuggable()
+        if (showDebugLogs) {
+            DebugLogStore.start()
+        }
+
         vpnConsentLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult(),
         ) { result ->
@@ -74,6 +82,7 @@ class MainActivity : AppCompatActivity() {
             HyprspaceTheme {
                 HyprspaceApp(
                     viewModel = viewModel,
+                    showDebugLogs = showDebugLogs,
                     onToggleVpn = ::toggleVpn,
                 )
             }
@@ -90,6 +99,7 @@ class MainActivity : AppCompatActivity() {
             HyprspaceVpnService.stop(this)
             return
         }
+        if (state == VpnState.Stopping) return
 
         // The service expects filesDir/hyprspace.json to exist; first-launch
         // identity creation happens asynchronously in ConfigViewModel.
@@ -110,6 +120,9 @@ class MainActivity : AppCompatActivity() {
         HyprspaceVpnService.start(this)
     }
 
+    private fun isDebuggable(): Boolean =
+        (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
     private fun maybeRequestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -123,13 +136,15 @@ class MainActivity : AppCompatActivity() {
 @Composable
 fun HyprspaceApp(
     viewModel: ConfigViewModel,
+    showDebugLogs: Boolean,
     onToggleVpn: () -> Unit,
 ) {
     val config by viewModel.config.collectAsState()
     val vpnStatus by viewModel.vpnStatus.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(pageCount = { 2 })
+    val pageCount = if (showDebugLogs) 3 else 2
+    val pagerState = rememberPagerState(pageCount = { pageCount })
 
     // Surface fatal VPN errors once, as they arrive.
     LaunchedEffect(vpnStatus.state, vpnStatus.detail) {
@@ -174,10 +189,18 @@ fun HyprspaceApp(
                             .fillMaxSize()
                             .padding(bottom = 40.dp),
                     )
+
+                    2 -> LogsScreen(
+                        snackbarHostState = snackbarHostState,
+                        coroutineScope = coroutineScope,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 40.dp),
+                    )
                 }
             }
 
-            // Minimal page indicator — two dots, centered at the bottom.
+            // Minimal page indicator, centered at the bottom.
             // Not a navigation bar: no labels, no icons, no tappable items.
             Row(
                 modifier = Modifier
@@ -186,7 +209,7 @@ fun HyprspaceApp(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                repeat(2) { index ->
+                repeat(pageCount) { index ->
                     val selected = pagerState.currentPage == index
                     Box(
                         modifier = Modifier

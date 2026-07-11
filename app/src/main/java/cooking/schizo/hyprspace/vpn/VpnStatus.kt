@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 /** High-level VPN lifecycle, derived from gomobile [hyprspace.mobile.Events]. */
-enum class VpnState { Stopped, Connecting, Connected, Error }
+enum class VpnState { Stopped, Connecting, Connected, Stopping, Error }
 
 /**
  * Snapshot of the tunnel's status shown in the UI.
@@ -40,6 +40,11 @@ object VpnStateHolder {
         _status.value = VpnStatus(state = VpnState.Connecting)
     }
 
+    /** Marks shutdown in progress; the old node may still be releasing sockets. */
+    fun setStopping() {
+        _status.update { it.copy(state = VpnState.Stopping, detail = "") }
+    }
+
     /** Marks a clean shutdown. Late Go callbacks from the stopped node are ignored. */
     fun setStopped() {
         _status.value = VpnStatus(state = VpnState.Stopped)
@@ -65,7 +70,12 @@ object VpnStateHolder {
                 // a Go "stopped" callback. Keep the error visible until the next
                 // explicit start/stop transition instead of immediately clearing it.
                 "stopped" -> if (it.state == VpnState.Error) VpnState.Error else VpnState.Stopped
-                "error" -> if (it.state == VpnState.Stopped) VpnState.Stopped else VpnState.Error
+                "error" -> if (it.state == VpnState.Stopped || it.state == VpnState.Stopping) {
+                    it.state
+                } else {
+                    VpnState.Error
+                }
+
                 else -> it.state
             }
             val nextDetail = if (goState == "stopped" && it.state == VpnState.Error) {

@@ -73,13 +73,13 @@ fun IdentityScreen(
         coroutineScope.launch { snackbarHostState.showSnackbar("Copied") }
     }
 
-    fun revealKeyWithBiometric() {
+    fun authenticateThen(onSuccess: () -> Unit) {
         val activity = context as? FragmentActivity ?: return
         val executor = ContextCompat.getMainExecutor(context)
 
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                isKeyVisible = true
+                onSuccess()
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -192,7 +192,7 @@ fun IdentityScreen(
                 // Toggle visibility (requires biometric to reveal)
                 IconButton(
                     onClick = {
-                        if (isKeyVisible) isKeyVisible = false else revealKeyWithBiometric()
+                        if (isKeyVisible) isKeyVisible = false else authenticateThen { isKeyVisible = true }
                     },
                 ) {
                     Icon(
@@ -202,8 +202,17 @@ fun IdentityScreen(
                         else "Reveal private key",
                     )
                 }
+                // Copying the plaintext key is as sensitive as revealing it, so it
+                // requires the same biometric auth (unless already revealed).
                 IconButton(
-                    onClick = { config?.let { copyToClipboard("Private Key", it.privateKey) } },
+                    onClick = {
+                        val key = config?.privateKey ?: return@IconButton
+                        if (isKeyVisible) {
+                            copyToClipboard("Private Key", key)
+                        } else {
+                            authenticateThen { copyToClipboard("Private Key", key) }
+                        }
+                    },
                     enabled = config != null,
                 ) {
                     Icon(
@@ -226,8 +235,9 @@ fun IdentityScreen(
         val vpnState = vpnStatus.state
         val running = vpnState == VpnState.Connected
         val connecting = vpnState == VpnState.Connecting
+        val stopping = vpnState == VpnState.Stopping
         val configReady = config != null
-        val actionEnabled = running || connecting || configReady
+        val actionEnabled = running || connecting || (!stopping && configReady)
 
         Spacer(modifier = Modifier.height(12.dp))
         Button(
@@ -245,14 +255,17 @@ fun IdentityScreen(
                 ButtonDefaults.buttonColors()
             },
         ) {
-            if (connecting) {
+            if (connecting || stopping) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(24.dp),
                     strokeWidth = 2.dp,
                     color = MaterialTheme.colorScheme.onPrimary,
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                Text(text = "Starting…", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    text = if (stopping) "Stopping…" else "Starting…",
+                    style = MaterialTheme.typography.titleLarge,
+                )
             } else {
                 Text(
                     text = when {
@@ -268,6 +281,7 @@ fun IdentityScreen(
         // Status line under the button.
         val statusText = when {
             connecting -> "Connecting…"
+            stopping -> "Stopping…"
             running && vpnStatus.connectedPeers > 0 ->
                 "Connected · ${vpnStatus.connectedPeers}/${vpnStatus.totalPeers} peers"
 

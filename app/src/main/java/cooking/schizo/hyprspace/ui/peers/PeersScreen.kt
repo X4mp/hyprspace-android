@@ -75,7 +75,9 @@ fun PeersScreen(
     var peerToDelete by remember { mutableStateOf<PeerConfig?>(null) }
     var peerToShow by remember { mutableStateOf<PeerConfig?>(null) }
     val peers = config?.peers ?: emptyList()
-    val editsLocked = vpnStatus.state == VpnState.Connecting || vpnStatus.state == VpnState.Connected
+    val editsLocked = vpnStatus.state == VpnState.Connecting ||
+            vpnStatus.state == VpnState.Connected ||
+            vpnStatus.state == VpnState.Stopping
 
     fun showEditLockedMessage() {
         coroutineScope.launch {

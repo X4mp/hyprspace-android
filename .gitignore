@@ -8,3 +8,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Local-only agent notes; do not commit
+/AGENTS.md
+/specs

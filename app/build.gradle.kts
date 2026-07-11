@@ -22,7 +22,7 @@ android {
         // APK to the ones real devices use to keep its size down. Add "x86_64" if
         // you need to run on an emulator.
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
