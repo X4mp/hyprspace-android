@@ -12,3 +12,4 @@ local.properties
 # Local-only agent notes; do not commit
 /AGENTS.md
 /specs
+app/libs/hyprspace.aar
